@@ -139,7 +139,9 @@ async function loadPeople(force) {
   try {
     const u = new URL(cfg.url); u.searchParams.set('action', 'people');
     if (cfg.secret) u.searchParams.set('secret', cfg.secret);
-    const data = await (await fetch(u)).json();
+    const r = await fetch(u);
+    const txt = await r.text();
+    let data; try { data = JSON.parse(txt); } catch { throw new Error('Script error (HTTP ' + r.status + ')'); }
     if (!data.ok) { if (/secret/i.test(data.error || '')) askSecret('Wrong or missing secret — enter it in Settings'); throw new Error(data.error || 'error'); }
     people = new Map(data.people.map(([id, n, t]) => [normId(id), [n, t]]));
     peopleMeta = { at: Date.now(), count: people.size };
@@ -236,7 +238,10 @@ async function send(item) {
     headers: { 'Content-Type': 'text/plain;charset=utf-8' }, // avoids CORS preflight
     body: JSON.stringify({ ...payload, secret: cfg.secret })
   });
-  const data = await res.json();
+  const txt = await res.text();
+  let data;
+  try { data = JSON.parse(txt); }
+  catch { const m = txt.match(/<title>([^<]*)<\/title>/i) || txt.match(/Error[^<]{0,120}/); throw new Error('Script error: ' + (m ? (m[1] || m[0]) : 'HTTP ' + res.status)); }
   if (!data.ok) { const err = new Error(data.error || 'Server error'); err.fatal = /required|Missing|secret/i.test(err.message); throw err; }
   return data;
 }
@@ -268,7 +273,9 @@ async function flush() {
       } catch (e) {
         if (/secret/i.test(e.message)) { renderLog(item, 'waiting — wrong secret'); askSecret('Wrong or missing secret — scans are kept, enter it in Settings'); break; }
         if (e.fatal) { renderLog(item, 'rejected: ' + e.message); setStatus('Rejected: ' + e.message, false); queue.shift(); store.set('queue', queue); continue; }
-        renderLog(item, 'offline — will retry');
+        const why = (e && e.message) || 'no connection';
+        renderLog(item, 'not saved yet — ' + why);
+        setStatus('Not saved yet: ' + why + ' (retrying every 15 s)', false);
         break;
       } finally { updateQueueInfo(); }
     }
