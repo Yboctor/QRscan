@@ -31,6 +31,7 @@
   li:last-child { border-bottom:0; }
   li small { color:var(--muted); text-align:right; }
   .hidden { display:none; }
+  .cover { display:block; width:100%; height:auto; border-radius:14px; margin:0 0 12px; background:var(--border); }
   #person { border-radius:12px; padding:14px; margin-top:10px; border:2px solid var(--border); }
   #person.found { border-color:var(--accent); }
   #person.notfound { border-color:var(--err); }
@@ -44,6 +45,7 @@
 </head>
 <body>
 <main>
+  <img class="cover" src="https://i.postimg.cc/5NGY20KY/cover-train.jpg" alt="Training" onerror="this.remove()">
   <h1>Training Form <button class="ghost" id="toggleSettings">Settings</button></h1>
 
   <div class="card hidden" id="settings">
