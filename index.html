@@ -45,9 +45,11 @@
   <h1>Training Form <button class="ghost" id="toggleSettings">Settings</button></h1>
 
   <div class="card hidden" id="settings">
-    <label>Apps Script Web App URL</label>
-    <input id="url" placeholder="https://script.google.com/macros/s/.../exec">
-    <label>Secret (only if set in the script)</label>
+    <div id="urlBox">
+      <label>Apps Script Web App URL</label>
+      <input id="url" placeholder="https://script.google.com/macros/s/.../exec">
+    </div>
+    <label>Secret</label>
     <input id="secret" type="password">
     <button id="save">Save</button>
   </div>
@@ -97,7 +99,7 @@ const FORM = {
   notes: ['Check in', 'Check out', 'Check In Late', 'Check out Early']
 };
 // Paste your Apps Script /exec URL here to hardcode it for everyone, or enter it in Settings.
-const DEFAULT_URL = '';
+const DEFAULT_URL = 'https://script.google.com/macros/s/AKfycbwpayrgMeoreDgW_AxhiRim-rIeGBVDjb7MnNggPAA0au5qetGmnPY_VxUoWIwEdY5rMw/exec';
 const PEOPLE_MAX_AGE = 6 * 60 * 60 * 1000; // re-download the names list if older than 6 hours
 
 const $ = id => document.getElementById(id);
@@ -107,7 +109,7 @@ const store = {
 };
 
 let cfg = store.get('cfg', { url: DEFAULT_URL, secret: '' });
-if (!cfg.url && DEFAULT_URL) cfg.url = DEFAULT_URL;
+if (DEFAULT_URL) cfg.url = DEFAULT_URL; // built-in URL always wins
 let queue = store.get('queue', []);
 let lastCode = '', lastTime = 0, scanner = null, running = false, flushing = false, shownCode = '';
 
@@ -129,7 +131,7 @@ async function loadPeople(force) {
     const u = new URL(cfg.url); u.searchParams.set('action', 'people');
     if (cfg.secret) u.searchParams.set('secret', cfg.secret);
     const data = await (await fetch(u)).json();
-    if (!data.ok) throw new Error(data.error || 'error');
+    if (!data.ok) { if (/secret/i.test(data.error || '')) askSecret('Wrong or missing secret — enter it in Settings'); throw new Error(data.error || 'error'); }
     people = new Map(data.people.map(([id, n, t]) => [normId(id), [n, t]]));
     peopleMeta = { at: Date.now(), count: people.size };
     store.set('people', data.people.map(([id, n, t]) => [normId(id), n, t]));
@@ -157,10 +159,17 @@ $('course').onchange = () => { store.set('course', $('course').value); $('course
 $('day').onchange = () => { store.set('day', $('day').value); $('day').classList.remove('missing'); };
 
 $('url').value = cfg.url || ''; $('secret').value = cfg.secret || '';
+if (DEFAULT_URL) $('urlBox').classList.add('hidden');
+function askSecret(msg) {
+  $('settings').classList.remove('hidden');
+  $('secret').focus();
+  setStatus(msg || 'Enter the secret in Settings', false);
+}
 if (!cfg.url) $('settings').classList.remove('hidden');
+else if (!cfg.secret) askSecret('Enter the secret in Settings, then Save');
 $('toggleSettings').onclick = () => $('settings').classList.toggle('hidden');
 $('save').onclick = () => {
-  cfg = { url: $('url').value.trim(), secret: $('secret').value };
+  cfg = { url: DEFAULT_URL || $('url').value.trim(), secret: $('secret').value.trim() };
   store.set('cfg', cfg);
   $('settings').classList.add('hidden');
   setStatus('Settings saved', true);
@@ -235,6 +244,7 @@ async function flush() {
         renderLog(item, 'saved ✓');
         queue.shift(); store.set('queue', queue);
       } catch (e) {
+        if (/secret/i.test(e.message)) { renderLog(item, 'waiting — wrong secret'); askSecret('Wrong or missing secret — scans are kept, enter it in Settings'); break; }
         if (e.fatal) { renderLog(item, 'rejected: ' + e.message); setStatus('Rejected: ' + e.message, false); queue.shift(); store.set('queue', queue); continue; }
         renderLog(item, 'offline — will retry');
         break;
