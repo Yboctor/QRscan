@@ -38,6 +38,8 @@
   #person .ptroop { font-size:17px; margin-top:4px; }
   #person .pid { font-size:13px; color:var(--muted); margin-top:6px; font-variant-numeric:tabular-nums; }
   #person.notfound .pname { color:var(--err); }
+  #person.dup { border-color:#d97706; }
+  #person.dup .pname { color:#d97706; }
 </style>
 </head>
 <body>
@@ -101,6 +103,7 @@ const FORM = {
 // Paste your Apps Script /exec URL here to hardcode it for everyone, or enter it in Settings.
 const DEFAULT_URL = 'https://script.google.com/macros/s/AKfycbwpayrgMeoreDgW_AxhiRim-rIeGBVDjb7MnNggPAA0au5qetGmnPY_VxUoWIwEdY5rMw/exec';
 const PEOPLE_MAX_AGE = 6 * 60 * 60 * 1000; // re-download the names list if older than 6 hours
+const DUP_WINDOW = 10 * 60 * 1000;           // same ID can't be scanned again within 10 minutes
 
 const $ = id => document.getElementById(id);
 const store = {
@@ -111,6 +114,10 @@ const store = {
 let cfg = store.get('cfg', { url: DEFAULT_URL, secret: '' });
 if (DEFAULT_URL) cfg.url = DEFAULT_URL; // built-in URL always wins
 let queue = store.get('queue', []);
+// ID -> time of last accepted scan on this phone (for the 10-minute rule)
+let recent = store.get('recent', {});
+function pruneRecent() { const cut = Date.now() - DUP_WINDOW; for (const k in recent) if (recent[k] < cut) delete recent[k]; store.set('recent', recent); }
+pruneRecent();
 let lastCode = '', lastTime = 0, scanner = null, running = false, flushing = false, shownCode = '';
 
 // ---- Names cache (ID -> [name, group]) kept on this phone ----
@@ -196,11 +203,16 @@ function renderLog(item, state) {
   li.children[1].style.color = state === 'saved ✓' ? 'var(--accent)' : '';
 }
 
-function showPerson(code, person, pending) {
+function showPerson(code, person, pending, dupAt) {
   const box = $('person');
   shownCode = code;
-  box.classList.remove('hidden', 'found', 'notfound');
-  if (person) {
+  box.classList.remove('hidden', 'found', 'notfound', 'dup');
+  if (dupAt) {
+    box.classList.add('dup');
+    const mins = Math.max(0, Math.round((Date.now() - dupAt) / 60000));
+    $('pName').textContent = 'Already scanned ' + (mins < 1 ? 'just now' : mins + ' min ago');
+    $('pTroop').textContent = (person && person.name ? person.name + (person.troop ? ' · ' + person.troop : '') + ' — ' : '') + 'not saved again';
+  } else if (person) {
     box.classList.add('found');
     $('pName').textContent = person.name || '(no name)';
     $('pTroop').textContent = person.troop || '';
@@ -236,6 +248,14 @@ async function flush() {
       const item = queue[0];
       try {
         const data = await send(item);
+        if (data.duplicate) {
+          // Another phone scanned this ID within 10 minutes
+          recent[item.code] = data.lastAt || item.ts; store.set('recent', recent);
+          renderLog(item, 'duplicate — not saved');
+          if (shownCode === item.code) showPerson(item.code, item.name ? { name: item.name, troop: item.troop } : (data.person || null), false, data.lastAt || item.ts);
+          queue.shift(); store.set('queue', queue);
+          continue;
+        }
         if (item.skipLookup !== true) {
           // Name wasn't in the phone's list: use the server's answer.
           if (data.person) { item.name = data.person.name; item.troop = data.person.troop; }
@@ -257,7 +277,7 @@ function submit(code) {
   code = normId(code);
   if (!code) return;
   const now = Date.now();
-  if (code === lastCode && now - lastTime < 3000) return; // ignore repeat reads of same code
+  if (code === lastCode && now - lastTime < 3000) return; // camera re-reading the same code
   if (!cfg.url) { setStatus('Add your Apps Script URL in Settings first', false); return; }
   const missing = ['course', 'day'].filter(k => !$(k).value);
   if (missing.length) {
@@ -265,9 +285,18 @@ function submit(code) {
     setStatus('Select Training course and Day first', false); return;
   }
   lastCode = code; lastTime = now;
+  const hit = people.get(code);
+
+  // 10-minute duplicate rule (this phone)
+  if (recent[code] && now - recent[code] < DUP_WINDOW) {
+    if (navigator.vibrate) navigator.vibrate([60, 60, 60]);
+    showPerson(code, hit ? { name: hit[0], troop: hit[1] } : null, false, recent[code]);
+    setStatus('Duplicate — not saved', false);
+    return;
+  }
+  recent[code] = now; store.set('recent', recent);
   if (navigator.vibrate) navigator.vibrate(80);
 
-  const hit = people.get(code);
   const item = { code, ts: now, course: $('course').value, day: $('day').value, note: $('note').value, skipLookup: !!hit };
   if (hit) { item.name = hit[0]; item.troop = hit[1]; }
   $('note').value = ''; // Note does not remember its value (per form)
