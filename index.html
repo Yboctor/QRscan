@@ -1,0 +1,151 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>QR to Sheet</title>
+<script src="https://cdn.jsdelivr.net/npm/html5-qrcode@2.3.8/html5-qrcode.min.js"></script>
+<style>
+  :root { --bg:#f5f6f8; --card:#fff; --text:#1a1d21; --muted:#6b7280; --accent:#1a7f5a; --err:#c0392b; --border:#e3e5e8; }
+  @media (prefers-color-scheme: dark) { :root { --bg:#111315; --card:#1b1e21; --text:#eceef0; --muted:#9aa1a9; --border:#2c3035; } }
+  * { box-sizing:border-box; }
+  body { margin:0; font-family:system-ui,-apple-system,sans-serif; background:var(--bg); color:var(--text); }
+  main { max-width:520px; margin:0 auto; padding:16px; }
+  h1 { font-size:20px; margin:4px 0 12px; display:flex; justify-content:space-between; align-items:center; }
+  .card { background:var(--card); border:1px solid var(--border); border-radius:14px; padding:14px; margin-bottom:12px; }
+  #reader { width:100%; border-radius:10px; overflow:hidden; }
+  button { font:inherit; border:0; border-radius:10px; padding:12px 16px; background:var(--accent); color:#fff; font-weight:600; width:100%; }
+  button.ghost { background:transparent; color:var(--muted); border:1px solid var(--border); width:auto; padding:6px 10px; font-size:14px; }
+  input { font:inherit; width:100%; padding:10px; border-radius:8px; border:1px solid var(--border); background:var(--bg); color:var(--text); margin:4px 0 10px; }
+  label { font-size:13px; color:var(--muted); }
+  #status { font-size:15px; min-height:22px; margin-top:10px; }
+  .ok { color:var(--accent); } .bad { color:var(--err); }
+  ul { list-style:none; padding:0; margin:0; }
+  li { padding:8px 0; border-bottom:1px solid var(--border); font-size:14px; display:flex; justify-content:space-between; gap:8px; word-break:break-all; }
+  li:last-child { border-bottom:0; }
+  li small { color:var(--muted); white-space:nowrap; }
+  .hidden { display:none; }
+</style>
+</head>
+<body>
+<main>
+  <h1>QR → Sheet <button class="ghost" id="toggleSettings">Settings</button></h1>
+
+  <div class="card hidden" id="settings">
+    <label>Apps Script Web App URL</label>
+    <input id="url" placeholder="https://script.google.com/macros/s/.../exec">
+    <label>Device / scanner name (optional)</label>
+    <input id="device" placeholder="e.g. Gate 1">
+    <label>Secret (only if set in the script)</label>
+    <input id="secret" type="password">
+    <button id="save">Save</button>
+  </div>
+
+  <div class="card">
+    <div id="reader"></div>
+    <button id="startBtn" style="margin-top:10px">Start scanning</button>
+    <div id="status"></div>
+  </div>
+
+  <div class="card">
+    <strong>Recent scans</strong> <small id="queueInfo" style="color:var(--muted)"></small>
+    <ul id="log"></ul>
+  </div>
+</main>
+
+<script>
+const $ = id => document.getElementById(id);
+const store = {
+  get(k, d) { try { const v = localStorage.getItem(k); return v === null ? d : JSON.parse(v); } catch { return d; } },
+  set(k, v) { try { localStorage.setItem(k, JSON.stringify(v)); } catch {} }
+};
+
+// Paste your URL here to hardcode it for everyone, or enter it in Settings.
+const DEFAULT_URL = '';
+
+let cfg = store.get('cfg', { url: DEFAULT_URL, device: '', secret: '' });
+if (!cfg.url && DEFAULT_URL) cfg.url = DEFAULT_URL;
+let queue = store.get('queue', []);
+let lastCode = '', lastTime = 0, scanner = null, running = false;
+
+$('url').value = cfg.url; $('device').value = cfg.device; $('secret').value = cfg.secret;
+if (!cfg.url) $('settings').classList.remove('hidden');
+$('toggleSettings').onclick = () => $('settings').classList.toggle('hidden');
+$('save').onclick = () => {
+  cfg = { url: $('url').value.trim(), device: $('device').value.trim(), secret: $('secret').value };
+  store.set('cfg', cfg);
+  $('settings').classList.add('hidden');
+  setStatus('Settings saved', true);
+  flush();
+};
+
+function setStatus(msg, ok) { $('status').textContent = msg; $('status').className = ok ? 'ok' : 'bad'; }
+function addLog(code, state) {
+  const li = document.createElement('li');
+  li.innerHTML = `<span></span><small>${new Date().toLocaleTimeString()} · ${state}</small>`;
+  li.firstChild.textContent = code;
+  $('log').prepend(li);
+  while ($('log').children.length > 20) $('log').lastChild.remove();
+}
+function updateQueueInfo() { $('queueInfo').textContent = queue.length ? `(${queue.length} waiting to send)` : ''; }
+
+async function send(item) {
+  const res = await fetch(cfg.url, {
+    method: 'POST',
+    headers: { 'Content-Type': 'text/plain;charset=utf-8' }, // avoids CORS preflight
+    body: JSON.stringify(item)
+  });
+  const data = await res.json();
+  if (!data.ok) throw new Error(data.error || 'Server error');
+}
+
+async function flush() {
+  if (!cfg.url) return;
+  while (queue.length) {
+    try { await send(queue[0]); queue.shift(); store.set('queue', queue); }
+    catch { break; }
+  }
+  updateQueueInfo();
+}
+
+async function onScan(code) {
+  const now = Date.now();
+  if (code === lastCode && now - lastTime < 3000) return; // ignore repeat reads of same code
+  lastCode = code; lastTime = now;
+  if (navigator.vibrate) navigator.vibrate(80);
+  if (!cfg.url) { setStatus('Add your Apps Script URL in Settings first', false); return; }
+
+  const item = { code, ts: now, device: cfg.device, secret: cfg.secret };
+  setStatus('Sending…', true);
+  try {
+    await send(item);
+    setStatus('✓ Saved: ' + code, true);
+    addLog(code, 'saved');
+  } catch (e) {
+    queue.push(item); store.set('queue', queue); updateQueueInfo();
+    setStatus('Offline or error — queued, will retry', false);
+    addLog(code, 'queued');
+  }
+}
+
+$('startBtn').onclick = async () => {
+  if (running) {
+    await scanner.stop(); running = false;
+    $('startBtn').textContent = 'Start scanning'; return;
+  }
+  scanner = scanner || new Html5Qrcode('reader');
+  try {
+    await scanner.start({ facingMode: 'environment' }, { fps: 10, qrbox: { width: 240, height: 240 } }, onScan);
+    running = true; $('startBtn').textContent = 'Stop';
+    setStatus('Point the camera at a QR code', true);
+  } catch (e) {
+    setStatus('Camera error: ' + e + ' (page must be on https and camera allowed)', false);
+  }
+};
+
+updateQueueInfo();
+setInterval(flush, 15000);
+window.addEventListener('online', flush);
+</script>
+</body>
+</html>
