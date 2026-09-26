@@ -103,7 +103,7 @@ function fill(sel, list, placeholder, keep) {
 }
 
 // Training course + Day: required, remembered. Note: optional, resets after each scan.
-fill($('course'), store.get('courses', FORM.courses), '— Select —', store.get('course', ''));
+fill($('course'), FORM.courses, '— Select —', store.get('course', ''));
 fill($('day'), FORM.days, '— Select —', store.get('day', ''));
 fill($('note'), FORM.notes, '—', '');
 $('course').onchange = () => { store.set('course', $('course').value); $('course').classList.remove('missing'); };
@@ -117,21 +117,8 @@ $('save').onclick = () => {
   store.set('cfg', cfg);
   $('settings').classList.add('hidden');
   setStatus('Settings saved', true);
-  loadCourses(); flush();
+  flush();
 };
-
-// If the sheet has a "Courses" tab, use it; otherwise keep the form's list.
-async function loadCourses() {
-  if (!cfg.url) return;
-  try {
-    const res = await fetch(cfg.url + (cfg.url.includes('?') ? '&' : '?') + 'action=courses');
-    const data = await res.json();
-    if (data.ok && data.courses && data.courses.length) {
-      store.set('courses', data.courses);
-      fill($('course'), data.courses, '— Select —');
-    }
-  } catch {}
-}
 
 function setStatus(msg, ok) { $('status').textContent = msg; $('status').className = ok ? 'ok' : 'bad'; }
 function addLog(item, state) {
@@ -211,7 +198,6 @@ $('startBtn').onclick = async () => {
 };
 
 updateQueueInfo();
-loadCourses();
 setInterval(flush, 15000);
 window.addEventListener('online', flush);
 </script>
