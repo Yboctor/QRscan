@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Training Attendance Scanner</title>
+<title>Training Form</title>
 <script src="https://cdn.jsdelivr.net/npm/html5-qrcode@2.3.8/html5-qrcode.min.js"></script>
 <style>
   :root { --bg:#f5f6f8; --card:#fff; --text:#1a1d21; --muted:#6b7280; --accent:#1a7f5a; --err:#c0392b; --border:#e3e5e8; }
@@ -15,24 +15,27 @@
   .card { background:var(--card); border:1px solid var(--border); border-radius:14px; padding:14px; margin-bottom:12px; }
   #reader { width:100%; border-radius:10px; overflow:hidden; }
   button { font:inherit; border:0; border-radius:10px; padding:12px 16px; background:var(--accent); color:#fff; font-weight:600; width:100%; }
-  button:disabled { opacity:.5; }
   button.ghost { background:transparent; color:var(--muted); border:1px solid var(--border); width:auto; padding:6px 10px; font-size:14px; font-weight:500; }
   input, select { font:inherit; width:100%; padding:10px; border-radius:8px; border:1px solid var(--border); background:var(--bg); color:var(--text); margin:4px 0 10px; }
-  label { font-size:13px; color:var(--muted); display:flex; justify-content:space-between; align-items:center; }
-  .row { display:grid; grid-template-columns: 1fr 110px; gap:10px; }
+  select.missing { border-color:var(--err); }
+  label { font-size:13px; color:var(--muted); display:block; }
+  label .req { color:var(--err); }
+  .two { display:grid; grid-template-columns:1fr 1fr; gap:10px; }
+  .manual { display:flex; gap:8px; margin-top:10px; }
+  .manual input { margin:0; }
+  .manual button { width:auto; white-space:nowrap; }
   #status { font-size:15px; min-height:22px; margin-top:10px; }
   .ok { color:var(--accent); } .bad { color:var(--err); }
   ul { list-style:none; padding:0; margin:0; }
   li { padding:8px 0; border-bottom:1px solid var(--border); font-size:14px; display:flex; justify-content:space-between; gap:8px; word-break:break-all; }
   li:last-child { border-bottom:0; }
-  li small { color:var(--muted); white-space:nowrap; text-align:right; }
-  .link { background:none; border:0; color:var(--accent); padding:0; width:auto; font-size:13px; font-weight:500; }
+  li small { color:var(--muted); text-align:right; }
   .hidden { display:none; }
 </style>
 </head>
 <body>
 <main>
-  <h1>Attendance Scanner <button class="ghost" id="toggleSettings">Settings</button></h1>
+  <h1>Training Form <button class="ghost" id="toggleSettings">Settings</button></h1>
 
   <div class="card hidden" id="settings">
     <label>Apps Script Web App URL</label>
@@ -43,20 +46,24 @@
   </div>
 
   <div class="card">
-    <div class="row">
+    <label>Training course <span class="req">*</span></label>
+    <select id="course"></select>
+    <div class="two">
       <div>
-        <label>Training course <button class="link" id="reloadCourses">↻ reload</button></label>
-        <select id="course"><option value="">Loading…</option></select>
-      </div>
-      <div>
-        <label>Day</label>
+        <label>Day <span class="req">*</span></label>
         <select id="day"></select>
       </div>
+      <div>
+        <label>Note</label>
+        <select id="note"></select>
+      </div>
     </div>
-    <label>Note (optional, applies to next scans)</label>
-    <input id="note" placeholder="">
     <div id="reader"></div>
     <button id="startBtn" style="margin-top:10px">Start scanning</button>
+    <div class="manual">
+      <input id="manualId" inputmode="numeric" placeholder="Or type ID manually">
+      <button class="ghost" id="manualBtn">Submit</button>
+    </div>
     <div id="status"></div>
   </div>
 
@@ -67,29 +74,40 @@
 </main>
 
 <script>
+// ---- Form structure (from Training_Form.sto) ----
+const FORM = {
+  courses: ['First Aid', 'Treasury', 'Leaders Academy Level 1', 'Leaders Academy Level 2', 'Safe From Harm', 'Safety'],
+  days: ['Day 1','Day 2','Day 3','Day 4','Day 5','Day 6','Day 7','Day 8','Construction','Practical Skills','Degla','Same City Discovery','Other City Discovery'],
+  notes: ['Check in', 'Check out', 'Check In Late', 'Check out Early']
+};
+// Paste your Apps Script /exec URL here to hardcode it for everyone, or enter it in Settings.
+const DEFAULT_URL = '';
+
 const $ = id => document.getElementById(id);
 const store = {
   get(k, d) { try { const v = localStorage.getItem(k); return v === null ? d : JSON.parse(v); } catch { return d; } },
   set(k, v) { try { localStorage.setItem(k, JSON.stringify(v)); } catch {} }
 };
 
-// Paste your URL here to hardcode it for everyone, or enter it in Settings.
-const DEFAULT_URL = '';
-
 let cfg = store.get('cfg', { url: DEFAULT_URL, secret: '' });
 if (!cfg.url && DEFAULT_URL) cfg.url = DEFAULT_URL;
 let queue = store.get('queue', []);
 let lastCode = '', lastTime = 0, scanner = null, running = false;
 
-// Day 1..8
-for (let i = 1; i <= 8; i++) {
-  const o = document.createElement('option'); o.value = o.textContent = 'Day ' + i; $('day').appendChild(o);
+function fill(sel, list, placeholder, keep) {
+  const cur = keep ?? sel.value;
+  sel.innerHTML = '';
+  const ph = document.createElement('option'); ph.value = ''; ph.textContent = placeholder; sel.appendChild(ph);
+  list.forEach(v => { const o = document.createElement('option'); o.value = o.textContent = v; sel.appendChild(o); });
+  if (cur && list.includes(cur)) sel.value = cur;
 }
-$('day').value = store.get('day', 'Day 1');
-$('day').onchange = () => store.set('day', $('day').value);
-$('note').value = store.get('note', '');
-$('note').oninput = () => store.set('note', $('note').value);
-$('course').onchange = () => store.set('course', $('course').value);
+
+// Training course + Day: required, remembered. Note: optional, resets after each scan.
+fill($('course'), store.get('courses', FORM.courses), '— Select —', store.get('course', ''));
+fill($('day'), FORM.days, '— Select —', store.get('day', ''));
+fill($('note'), FORM.notes, '—', '');
+$('course').onchange = () => { store.set('course', $('course').value); $('course').classList.remove('missing'); };
+$('day').onchange = () => { store.set('day', $('day').value); $('day').classList.remove('missing'); };
 
 $('url').value = cfg.url || ''; $('secret').value = cfg.secret || '';
 if (!cfg.url) $('settings').classList.remove('hidden');
@@ -101,37 +119,26 @@ $('save').onclick = () => {
   setStatus('Settings saved', true);
   loadCourses(); flush();
 };
-$('reloadCourses').onclick = () => loadCourses();
 
-function fillCourses(list) {
-  const sel = $('course'), saved = store.get('course', '');
-  sel.innerHTML = '';
-  const ph = document.createElement('option'); ph.value = ''; ph.textContent = list.length ? '— Select course —' : 'No courses found';
-  sel.appendChild(ph);
-  list.forEach(c => { const o = document.createElement('option'); o.value = o.textContent = c; sel.appendChild(o); });
-  if (saved && list.includes(saved)) sel.value = saved;
-}
-
+// If the sheet has a "Courses" tab, use it; otherwise keep the form's list.
 async function loadCourses() {
-  fillCourses(store.get('courses', []));
-  if (!cfg.url) { $('course').options[0].textContent = 'Set URL in Settings'; return; }
+  if (!cfg.url) return;
   try {
     const res = await fetch(cfg.url + (cfg.url.includes('?') ? '&' : '?') + 'action=courses');
     const data = await res.json();
-    if (!data.ok) throw new Error(data.error);
-    store.set('courses', data.courses);
-    fillCourses(data.courses);
-  } catch (e) {
-    setStatus('Could not load courses (using saved list)', false);
-  }
+    if (data.ok && data.courses && data.courses.length) {
+      store.set('courses', data.courses);
+      fill($('course'), data.courses, '— Select —');
+    }
+  } catch {}
 }
 
 function setStatus(msg, ok) { $('status').textContent = msg; $('status').className = ok ? 'ok' : 'bad'; }
 function addLog(item, state) {
   const li = document.createElement('li');
-  li.innerHTML = `<span></span><small></small>`;
+  li.innerHTML = '<span></span><small></small>';
   li.children[0].textContent = item.code;
-  li.children[1].textContent = `${item.course} · ${item.day} · ${new Date(item.ts).toLocaleTimeString()} · ${state}`;
+  li.children[1].textContent = [item.course, item.day, item.note, new Date(item.ts).toLocaleTimeString(), state].filter(Boolean).join(' · ');
   $('log').prepend(li);
   while ($('log').children.length > 20) $('log').lastChild.remove();
 }
@@ -156,37 +163,48 @@ async function flush() {
   updateQueueInfo();
 }
 
-async function onScan(code) {
+async function submit(code) {
+  code = String(code).trim();
+  if (!code) return;
   const now = Date.now();
   if (code === lastCode && now - lastTime < 3000) return; // ignore repeat reads of same code
-  lastCode = code; lastTime = now;
   if (!cfg.url) { setStatus('Add your Apps Script URL in Settings first', false); return; }
-  if (!$('course').value) { setStatus('Select a training course first', false); return; }
+  const missing = ['course', 'day'].filter(k => !$(k).value);
+  if (missing.length) {
+    missing.forEach(k => $(k).classList.add('missing'));
+    setStatus('Select Training course and Day first', false); return;
+  }
+  lastCode = code; lastTime = now;
   if (navigator.vibrate) navigator.vibrate(80);
 
-  const item = { code, ts: now, course: $('course').value, day: $('day').value, note: $('note').value.trim(), secret: cfg.secret };
+  const item = { code, ts: now, course: $('course').value, day: $('day').value, note: $('note').value, secret: cfg.secret };
+  $('note').value = ''; // Note does not remember its value (per form)
   setStatus('Sending…', true);
   try {
     await send(item);
     setStatus('✓ Saved: ' + code, true);
     addLog(item, 'saved');
   } catch (e) {
+    if (/required|Missing|secret/i.test(e.message)) { setStatus('Rejected: ' + e.message, false); return; }
     queue.push(item); store.set('queue', queue); updateQueueInfo();
     setStatus('Offline or error — queued, will retry', false);
     addLog(item, 'queued');
   }
 }
 
+$('manualBtn').onclick = () => { submit($('manualId').value); $('manualId').value = ''; };
+$('manualId').onkeydown = e => { if (e.key === 'Enter') $('manualBtn').click(); };
+
 $('startBtn').onclick = async () => {
   if (running) {
     await scanner.stop(); running = false;
     $('startBtn').textContent = 'Start scanning'; return;
   }
-  scanner = scanner || new Html5Qrcode('reader');
+  scanner = scanner || new Html5Qrcode('reader'); // reads QR codes and common barcodes
   try {
-    await scanner.start({ facingMode: 'environment' }, { fps: 10, qrbox: { width: 240, height: 240 } }, onScan);
+    await scanner.start({ facingMode: 'environment' }, { fps: 10, qrbox: { width: 250, height: 250 } }, submit);
     running = true; $('startBtn').textContent = 'Stop';
-    setStatus($('course').value ? 'Point the camera at a QR code' : 'Select a training course, then scan', !!$('course').value);
+    setStatus('Point the camera at a code', true);
   } catch (e) {
     setStatus('Camera error: ' + e + ' (page must be on https and camera allowed)', false);
   }
