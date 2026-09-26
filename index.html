@@ -31,6 +31,13 @@
   li:last-child { border-bottom:0; }
   li small { color:var(--muted); text-align:right; }
   .hidden { display:none; }
+  #person { border-radius:12px; padding:14px; margin-top:10px; border:2px solid var(--border); }
+  #person.found { border-color:var(--accent); }
+  #person.notfound { border-color:var(--err); }
+  #person .pname { font-size:22px; font-weight:700; line-height:1.3; }
+  #person .ptroop { font-size:17px; margin-top:4px; }
+  #person .pid { font-size:13px; color:var(--muted); margin-top:6px; font-variant-numeric:tabular-nums; }
+  #person.notfound .pname { color:var(--err); }
 </style>
 </head>
 <body>
@@ -65,6 +72,11 @@
       <button class="ghost" id="manualBtn">Submit</button>
     </div>
     <div id="status"></div>
+    <div id="person" class="hidden" dir="auto">
+      <div class="pname" id="pName"></div>
+      <div class="ptroop" id="pTroop"></div>
+      <div class="pid" id="pId"></div>
+    </div>
   </div>
 
   <div class="card">
@@ -124,7 +136,7 @@ function setStatus(msg, ok) { $('status').textContent = msg; $('status').classNa
 function addLog(item, state) {
   const li = document.createElement('li');
   li.innerHTML = '<span></span><small></small>';
-  li.children[0].textContent = item.code;
+  li.children[0].textContent = item.name ? `${item.name}${item.troop ? ' · Troop ' + item.troop : ''}` : item.code;
   li.children[1].textContent = [item.course, item.day, item.note, new Date(item.ts).toLocaleTimeString(), state].filter(Boolean).join(' · ');
   $('log').prepend(li);
   while ($('log').children.length > 20) $('log').lastChild.remove();
@@ -139,6 +151,7 @@ async function send(item) {
   });
   const data = await res.json();
   if (!data.ok) throw new Error(data.error || 'Server error');
+  return data;
 }
 
 async function flush() {
@@ -148,6 +161,27 @@ async function flush() {
     catch { break; }
   }
   updateQueueInfo();
+}
+
+function showPerson(code, data) {
+  const box = $('person');
+  box.classList.remove('hidden', 'found', 'notfound');
+  if (data && data.person) {
+    box.classList.add('found');
+    $('pName').textContent = data.person.name || '(no name)';
+    $('pTroop').textContent = data.person.troop ? 'Troop ' + data.person.troop : '';
+  } else if (data && data.lookupError) {
+    $('pName').textContent = 'Saved — lookup error';
+    $('pTroop').textContent = data.lookupError;
+  } else if (data) {
+    box.classList.add('notfound');
+    $('pName').textContent = 'Not found in list';
+    $('pTroop').textContent = 'Scan was saved anyway';
+  } else {
+    $('pName').textContent = 'Offline — queued';
+    $('pTroop').textContent = 'Name will not show for this scan';
+  }
+  $('pId').textContent = 'ID ' + code;
 }
 
 async function submit(code) {
@@ -168,12 +202,15 @@ async function submit(code) {
   $('note').value = ''; // Note does not remember its value (per form)
   setStatus('Sending…', true);
   try {
-    await send(item);
-    setStatus('✓ Saved: ' + code, true);
-    addLog(item, 'saved');
+    const data = await send(item);
+    setStatus('✓ Saved', true);
+    if (data.person) { item.name = data.person.name; item.troop = data.person.troop; }
+    showPerson(code, data);
+    addLog(item, data.person ? 'saved' : (data.lookupError ? 'saved' : 'saved · not in list'));
   } catch (e) {
     if (/required|Missing|secret/i.test(e.message)) { setStatus('Rejected: ' + e.message, false); return; }
     queue.push(item); store.set('queue', queue); updateQueueInfo();
+    showPerson(code, null);
     setStatus('Offline or error — queued, will retry', false);
     addLog(item, 'queued');
   }
