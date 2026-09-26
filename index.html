@@ -90,7 +90,13 @@
   </div>
 
   <div class="card">
-    <strong>Recent scans</strong> <small id="queueInfo" style="color:var(--muted)"></small>
+    <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap">
+      <div><strong>Recent scans</strong> <small id="queueInfo" style="color:var(--muted)"></small></div>
+      <div id="queueBtns" style="display:none;gap:6px">
+        <button class="ghost" id="retryBtn">↻ Retry now</button>
+        <button class="ghost" id="clearBtn" style="color:var(--err)">Clear unsaved</button>
+      </div>
+    </div>
     <ul id="log"></ul>
   </div>
 </main>
@@ -139,7 +145,7 @@ async function loadPeople(force) {
   try {
     const u = new URL(cfg.url); u.searchParams.set('action', 'people');
     if (cfg.secret) u.searchParams.set('secret', cfg.secret);
-    const r = await fetch(u);
+    const r = await fetchT(u, {}, 60000);
     const txt = await r.text();
     let data; try { data = JSON.parse(txt); } catch { throw new Error('Script error (HTTP ' + r.status + ')'); }
     if (!data.ok) { if (/secret/i.test(data.error || '')) askSecret('Wrong or missing secret — enter it in Settings'); throw new Error(data.error || 'error'); }
@@ -188,7 +194,10 @@ $('save').onclick = () => {
 };
 
 function setStatus(msg, ok) { $('status').textContent = msg; $('status').className = ok ? 'ok' : 'bad'; }
-function updateQueueInfo() { $('queueInfo').textContent = queue.length ? `(${queue.length} saving…)` : ''; }
+function updateQueueInfo() {
+  $('queueInfo').textContent = queue.length ? `(${queue.length} not saved yet)` : '';
+  $('queueBtns').style.display = queue.length ? 'flex' : 'none';
+}
 
 // Recent scans list; each entry updates its own state as it saves.
 function addLog(item) {
@@ -231,9 +240,18 @@ function showPerson(code, person, pending, dupAt) {
   $('pId').textContent = 'ID ' + code;
 }
 
+// fetch that gives up after 30 s so one stuck request can't block the queue forever
+async function fetchT(url, opts = {}, ms = 30000) {
+  const ctrl = new AbortController();
+  const t = setTimeout(() => ctrl.abort(), ms);
+  try { return await fetch(url, { ...opts, signal: ctrl.signal }); }
+  catch (e) { throw new Error(e.name === 'AbortError' ? 'no answer after 30 s' : 'no connection'); }
+  finally { clearTimeout(t); }
+}
+
 async function send(item) {
   const { name, troop, ...payload } = item;
-  const res = await fetch(cfg.url, {
+  const res = await fetchT(cfg.url, {
     method: 'POST',
     headers: { 'Content-Type': 'text/plain;charset=utf-8' }, // avoids CORS preflight
     body: JSON.stringify({ ...payload, secret: cfg.secret })
@@ -253,6 +271,7 @@ async function flush() {
   try {
     while (queue.length) {
       const item = queue[0];
+      if (!item) break;
       try {
         const data = await send(item);
         if (data.duplicate) {
@@ -260,7 +279,7 @@ async function flush() {
           recent[item.code] = data.lastAt || item.ts; store.set('recent', recent);
           renderLog(item, 'duplicate — not saved');
           if (shownCode === item.code) showPerson(item.code, item.name ? { name: item.name, troop: item.troop } : (data.person || null), false, data.lastAt || item.ts);
-          queue.shift(); store.set('queue', queue);
+          queue = queue.filter(x => x !== item); store.set('queue', queue);
           continue;
         }
         if (item.skipLookup !== true) {
@@ -269,10 +288,10 @@ async function flush() {
           if (shownCode === item.code) showPerson(item.code, data.person || null, false);
         }
         renderLog(item, 'saved ✓');
-        queue.shift(); store.set('queue', queue);
+        queue = queue.filter(x => x !== item); store.set('queue', queue);
       } catch (e) {
         if (/secret/i.test(e.message)) { renderLog(item, 'waiting — wrong secret'); askSecret('Wrong or missing secret — scans are kept, enter it in Settings'); break; }
-        if (e.fatal) { renderLog(item, 'rejected: ' + e.message); setStatus('Rejected: ' + e.message, false); queue.shift(); store.set('queue', queue); continue; }
+        if (e.fatal) { renderLog(item, 'rejected: ' + e.message); setStatus('Rejected: ' + e.message, false); queue = queue.filter(x => x !== item); store.set('queue', queue); continue; }
         const why = (e && e.message) || 'no connection';
         renderLog(item, 'not saved yet — ' + why);
         setStatus('Not saved yet: ' + why + ' (retrying every 15 s)', false);
@@ -318,6 +337,14 @@ function submit(code) {
   flush();
 }
 
+$('retryBtn').onclick = () => { if (flushing) { setStatus('Already trying — wait a few seconds', true); return; } setStatus('Retrying…', true); flush(); };
+$('clearBtn').onclick = () => {
+  if (!queue.length) return;
+  if (!window.confirm(`Delete ${queue.length} scan(s) that were NOT saved to the sheet?`)) return;
+  queue.forEach(it => { renderLog(it, 'cleared — not saved'); delete recent[it.code]; });
+  queue = []; store.set('queue', queue); store.set('recent', recent);
+  updateQueueInfo(); setStatus('Unsaved scans cleared', true);
+};
 $('manualBtn').onclick = () => { submit($('manualId').value); $('manualId').value = ''; };
 $('manualId').onkeydown = e => { if (e.key === 'Enter') $('manualBtn').click(); };
 
