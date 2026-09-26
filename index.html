@@ -72,6 +72,10 @@
       <button class="ghost" id="manualBtn">Submit</button>
     </div>
     <div id="status"></div>
+    <div style="font-size:13px;color:var(--muted);margin-top:6px;display:flex;justify-content:space-between;align-items:center">
+      <span id="peopleInfo">Names list: not loaded</span>
+      <button class="link" id="reloadPeople" style="background:none;border:0;color:var(--accent);padding:0;width:auto;font-size:13px;font-weight:600">↻ Update names</button>
+    </div>
     <div id="person" class="hidden" dir="auto">
       <div class="pname" id="pName"></div>
       <div class="ptroop" id="pTroop"></div>
@@ -94,17 +98,48 @@ const FORM = {
 };
 // Paste your Apps Script /exec URL here to hardcode it for everyone, or enter it in Settings.
 const DEFAULT_URL = '';
+const PEOPLE_MAX_AGE = 6 * 60 * 60 * 1000; // re-download the names list if older than 6 hours
 
 const $ = id => document.getElementById(id);
 const store = {
   get(k, d) { try { const v = localStorage.getItem(k); return v === null ? d : JSON.parse(v); } catch { return d; } },
-  set(k, v) { try { localStorage.setItem(k, JSON.stringify(v)); } catch {} }
+  set(k, v) { try { localStorage.setItem(k, JSON.stringify(v)); return true; } catch { return false; } }
 };
 
 let cfg = store.get('cfg', { url: DEFAULT_URL, secret: '' });
 if (!cfg.url && DEFAULT_URL) cfg.url = DEFAULT_URL;
 let queue = store.get('queue', []);
-let lastCode = '', lastTime = 0, scanner = null, running = false;
+let lastCode = '', lastTime = 0, scanner = null, running = false, flushing = false, shownCode = '';
+
+// ---- Names cache (ID -> [name, group]) kept on this phone ----
+const normId = v => String(v).replace(/\s+/g, '').replace(/\.0+$/, '');
+let people = new Map();
+let peopleMeta = store.get('peopleMeta', { at: 0, count: 0 });
+(store.get('people', []) || []).forEach(([id, n, t]) => people.set(id, [n, t]));
+function updatePeopleInfo(msg) {
+  $('peopleInfo').textContent = msg || (people.size
+    ? `Names list: ${people.size} people · updated ${new Date(peopleMeta.at).toLocaleString([], {dateStyle:'short', timeStyle:'short'})}`
+    : 'Names list: not loaded');
+}
+async function loadPeople(force) {
+  if (!cfg.url) return;
+  if (!force && people.size && Date.now() - peopleMeta.at < PEOPLE_MAX_AGE) return;
+  updatePeopleInfo('Names list: downloading…');
+  try {
+    const u = new URL(cfg.url); u.searchParams.set('action', 'people');
+    if (cfg.secret) u.searchParams.set('secret', cfg.secret);
+    const data = await (await fetch(u)).json();
+    if (!data.ok) throw new Error(data.error || 'error');
+    people = new Map(data.people.map(([id, n, t]) => [normId(id), [n, t]]));
+    peopleMeta = { at: Date.now(), count: people.size };
+    store.set('people', data.people.map(([id, n, t]) => [normId(id), n, t]));
+    store.set('peopleMeta', peopleMeta);
+    updatePeopleInfo();
+  } catch (e) {
+    updatePeopleInfo(people.size ? undefined : 'Names list: could not download (' + e.message + ')');
+  }
+}
+$('reloadPeople').onclick = () => loadPeople(true);
 
 function fill(sel, list, placeholder, keep) {
   const cur = keep ?? sel.value;
@@ -129,63 +164,87 @@ $('save').onclick = () => {
   store.set('cfg', cfg);
   $('settings').classList.add('hidden');
   setStatus('Settings saved', true);
-  flush();
+  loadPeople(true); flush();
 };
 
 function setStatus(msg, ok) { $('status').textContent = msg; $('status').className = ok ? 'ok' : 'bad'; }
-function addLog(item, state) {
+function updateQueueInfo() { $('queueInfo').textContent = queue.length ? `(${queue.length} saving…)` : ''; }
+
+// Recent scans list; each entry updates its own state as it saves.
+function addLog(item) {
   const li = document.createElement('li');
+  li.dataset.ts = item.ts;
   li.innerHTML = '<span></span><small></small>';
-  li.children[0].textContent = item.name ? `${item.name}${item.troop ? ' · Troop ' + item.troop : ''}` : item.code;
-  li.children[1].textContent = [item.course, item.day, item.note, new Date(item.ts).toLocaleTimeString(), state].filter(Boolean).join(' · ');
   $('log').prepend(li);
-  while ($('log').children.length > 20) $('log').lastChild.remove();
+  while ($('log').children.length > 30) $('log').lastChild.remove();
+  renderLog(item, 'saving…');
 }
-function updateQueueInfo() { $('queueInfo').textContent = queue.length ? `(${queue.length} waiting to send)` : ''; }
-
-async function send(item) {
-  const res = await fetch(cfg.url, {
-    method: 'POST',
-    headers: { 'Content-Type': 'text/plain;charset=utf-8' }, // avoids CORS preflight
-    body: JSON.stringify(item)
-  });
-  const data = await res.json();
-  if (!data.ok) throw new Error(data.error || 'Server error');
-  return data;
+function renderLog(item, state) {
+  const li = $('log').querySelector(`li[data-ts="${item.ts}"]`);
+  if (!li) return;
+  li.children[0].textContent = item.name ? `${item.name}${item.troop ? ' · ' + item.troop : ''}` : item.code;
+  li.children[1].textContent = [item.course, item.day, item.note, new Date(item.ts).toLocaleTimeString(), state].filter(Boolean).join(' · ');
+  li.children[1].style.color = state === 'saved ✓' ? 'var(--accent)' : '';
 }
 
-async function flush() {
-  if (!cfg.url) return;
-  while (queue.length) {
-    try { await send(queue[0]); queue.shift(); store.set('queue', queue); }
-    catch { break; }
-  }
-  updateQueueInfo();
-}
-
-function showPerson(code, data) {
+function showPerson(code, person, pending) {
   const box = $('person');
+  shownCode = code;
   box.classList.remove('hidden', 'found', 'notfound');
-  if (data && data.person) {
+  if (person) {
     box.classList.add('found');
-    $('pName').textContent = data.person.name || '(no name)';
-    $('pTroop').textContent = data.person.troop ? 'Troop ' + data.person.troop : '';
-  } else if (data && data.lookupError) {
-    $('pName').textContent = 'Saved — lookup error';
-    $('pTroop').textContent = data.lookupError;
-  } else if (data) {
+    $('pName').textContent = person.name || '(no name)';
+    $('pTroop').textContent = person.troop || '';
+  } else if (pending) {
+    $('pName').textContent = 'Looking up…';
+    $('pTroop').textContent = '';
+  } else {
     box.classList.add('notfound');
     $('pName').textContent = 'Not found in list';
-    $('pTroop').textContent = 'Scan was saved anyway';
-  } else {
-    $('pName').textContent = 'Offline — queued';
-    $('pTroop').textContent = 'Name will not show for this scan';
+    $('pTroop').textContent = 'Scan is saved anyway';
   }
   $('pId').textContent = 'ID ' + code;
 }
 
-async function submit(code) {
-  code = String(code).trim();
+async function send(item) {
+  const { name, troop, ...payload } = item;
+  const res = await fetch(cfg.url, {
+    method: 'POST',
+    headers: { 'Content-Type': 'text/plain;charset=utf-8' }, // avoids CORS preflight
+    body: JSON.stringify({ ...payload, secret: cfg.secret })
+  });
+  const data = await res.json();
+  if (!data.ok) { const err = new Error(data.error || 'Server error'); err.fatal = /required|Missing|secret/i.test(err.message); throw err; }
+  return data;
+}
+
+// Sends queued scans one by one in the background.
+async function flush() {
+  if (!cfg.url || flushing) return;
+  flushing = true;
+  try {
+    while (queue.length) {
+      const item = queue[0];
+      try {
+        const data = await send(item);
+        if (item.skipLookup !== true) {
+          // Name wasn't in the phone's list: use the server's answer.
+          if (data.person) { item.name = data.person.name; item.troop = data.person.troop; }
+          if (shownCode === item.code) showPerson(item.code, data.person || null, false);
+        }
+        renderLog(item, 'saved ✓');
+        queue.shift(); store.set('queue', queue);
+      } catch (e) {
+        if (e.fatal) { renderLog(item, 'rejected: ' + e.message); setStatus('Rejected: ' + e.message, false); queue.shift(); store.set('queue', queue); continue; }
+        renderLog(item, 'offline — will retry');
+        break;
+      } finally { updateQueueInfo(); }
+    }
+  } finally { flushing = false; }
+}
+
+function submit(code) {
+  code = normId(code);
   if (!code) return;
   const now = Date.now();
   if (code === lastCode && now - lastTime < 3000) return; // ignore repeat reads of same code
@@ -198,22 +257,17 @@ async function submit(code) {
   lastCode = code; lastTime = now;
   if (navigator.vibrate) navigator.vibrate(80);
 
-  const item = { code, ts: now, course: $('course').value, day: $('day').value, note: $('note').value, secret: cfg.secret };
+  const hit = people.get(code);
+  const item = { code, ts: now, course: $('course').value, day: $('day').value, note: $('note').value, skipLookup: !!hit };
+  if (hit) { item.name = hit[0]; item.troop = hit[1]; }
   $('note').value = ''; // Note does not remember its value (per form)
-  setStatus('Sending…', true);
-  try {
-    const data = await send(item);
-    setStatus('✓ Saved', true);
-    if (data.person) { item.name = data.person.name; item.troop = data.person.troop; }
-    showPerson(code, data);
-    addLog(item, data.person ? 'saved' : (data.lookupError ? 'saved' : 'saved · not in list'));
-  } catch (e) {
-    if (/required|Missing|secret/i.test(e.message)) { setStatus('Rejected: ' + e.message, false); return; }
-    queue.push(item); store.set('queue', queue); updateQueueInfo();
-    showPerson(code, null);
-    setStatus('Offline or error — queued, will retry', false);
-    addLog(item, 'queued');
-  }
+
+  // Show instantly from the phone's list; save in background.
+  showPerson(code, hit ? { name: hit[0], troop: hit[1] } : null, !hit);
+  setStatus('✓ Scanned', true);
+  addLog(item);
+  queue.push(item); store.set('queue', queue); updateQueueInfo();
+  flush();
 }
 
 $('manualBtn').onclick = () => { submit($('manualId').value); $('manualId').value = ''; };
@@ -234,7 +288,12 @@ $('startBtn').onclick = async () => {
   }
 };
 
+// Show queued-from-last-time items in the log
+queue.forEach(it => { addLog(it); renderLog(it, 'waiting to save'); });
 updateQueueInfo();
+updatePeopleInfo();
+loadPeople(false);
+flush();
 setInterval(flush, 15000);
 window.addEventListener('online', flush);
 </script>
