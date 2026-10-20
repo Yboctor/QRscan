@@ -47,12 +47,15 @@
 <main>
   <img class="cover" src="https://i.postimg.cc/5NGY20KY/cover-train.jpg" alt="Training" onerror="this.remove()">
   <h1>Training Form <button class="ghost" id="toggleSettings">Settings</button></h1>
+  <div id="whoLine" style="font-size:14px;color:var(--muted);margin:-6px 0 12px"></div>
 
   <div class="card hidden" id="settings">
     <div id="urlBox">
       <label>Apps Script Web App URL</label>
       <input id="url" placeholder="https://script.google.com/macros/s/.../exec">
     </div>
+    <label>Your name (who is scanning) <span class="req">*</span></label>
+    <input id="scannerName" placeholder="e.g. Youssef" autocomplete="name">
     <label>Secret</label>
     <input id="secret" type="password">
     <button id="save">Save</button>
@@ -182,11 +185,29 @@ function askSecret(msg) {
   $('secret').focus();
   setStatus(msg || 'Enter the secret in Settings', false);
 }
+$('scannerName').value = cfg.scanner || '';
+function updateWho() {
+  $('whoLine').innerHTML = cfg.scanner ? 'Scanning as <b></b> · <a href="#" id="changeWho" style="color:var(--accent)">change</a>' : '';
+  if (cfg.scanner) {
+    $('whoLine').querySelector('b').textContent = cfg.scanner;
+    $('changeWho').onclick = e => { e.preventDefault(); $('settings').classList.remove('hidden'); $('scannerName').focus(); };
+  }
+}
+function askName() {
+  $('settings').classList.remove('hidden');
+  $('scannerName').focus();
+  setStatus('Enter your name in Settings, then Save', false);
+}
+updateWho();
 if (!cfg.url) $('settings').classList.remove('hidden');
+else if (!cfg.scanner) askName();
 else if (!cfg.secret) askSecret('Enter the secret in Settings, then Save');
 $('toggleSettings').onclick = () => $('settings').classList.toggle('hidden');
 $('save').onclick = () => {
-  cfg = { url: DEFAULT_URL || $('url').value.trim(), secret: $('secret').value.trim() };
+  const nm = $('scannerName').value.trim();
+  if (!nm) { askName(); return; }
+  cfg = { url: DEFAULT_URL || $('url').value.trim(), secret: $('secret').value.trim(), scanner: nm };
+  updateWho();
   store.set('cfg', cfg);
   $('settings').classList.add('hidden');
   setStatus('Settings saved', true);
@@ -307,6 +328,7 @@ function submit(code) {
   const now = Date.now();
   if (code === lastCode && now - lastTime < 3000) return; // camera re-reading the same code
   if (!cfg.url) { setStatus('Add your Apps Script URL in Settings first', false); return; }
+  if (!cfg.scanner) { askName(); return; }
   const missing = ['course', 'day'].filter(k => !$(k).value);
   if (missing.length) {
     missing.forEach(k => $(k).classList.add('missing'));
@@ -325,7 +347,7 @@ function submit(code) {
   recent[code] = now; store.set('recent', recent);
   if (navigator.vibrate) navigator.vibrate(80);
 
-  const item = { code, ts: now, course: $('course').value, day: $('day').value, note: $('note').value, skipLookup: !!hit };
+  const item = { code, ts: now, course: $('course').value, day: $('day').value, note: $('note').value, scanner: cfg.scanner || '', skipLookup: !!hit };
   if (hit) { item.name = hit[0]; item.troop = hit[1]; }
   $('note').value = ''; // Note does not remember its value (per form)
 
